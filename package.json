@@ -1,0 +1,17 @@
+{
+  "name": "webgl-wind-esmod",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "vite preview"
+  },
+  "devDependencies": {
+    "@types/dat.gui": "^0.7.7",
+    "vite": "^2.4.4"
+  },
+  "dependencies": {
+    "dat.gui": "^0.7.7"
+  }
+}
