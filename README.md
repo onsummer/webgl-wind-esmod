@@ -1,3 +1,5 @@
+使用 vite + vanillajs 模板改写自 https://github.com/mapbox/webgl-wind 项目，原项目使用 rollup 作为打包器、开发服务器，本仓库更合适现代前端封装使用。
+
 # 1 如何启动并查看效果
 
 ## 安装依赖
