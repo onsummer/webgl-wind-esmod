@@ -18,6 +18,8 @@ const defaultRampColors = new Map([
 /**
  * 从一条颜色带中绘制一根线性渐变线段
  * @param {Map<number, string>} colors key 从 0.0 到 1.0 的一个 hex 格式颜色色带
+ * 
+ * @returns {Uint8Array}
  */
 const getColorRamp = (colors) => {
   const canvas = document.createElement('canvas')
