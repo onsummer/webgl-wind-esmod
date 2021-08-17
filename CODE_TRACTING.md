@@ -1,23 +1,23 @@
 # 1 WindGL 成员变量
 
 - 着色器程序（`WebGLProgram`）
-  - drawProgram
-  - screenProgram
-  - updateProgram
+  - drawProgram：绘制粒子的着色器
+  - screenProgram：绘制全屏的着色器
+  - updateProgram：对粒子进行更新的着色器
 - 纹理对象（`WebGLTexture`）
-  - windTexture
-  - backgroundTexture
-  - screenTexture
-  - colorRampTexture
-  - particleStateTexture0
-  - particleStateTexture1
+  - windTexture：风力数据纹理，被设置成 `CLAMP_TO_EDGE` 拉伸模式
+  - backgroundTexture：由上一帧的 screenTexture 而来，作为稍微透明一点的纹理置于下层
+  - screenTexture：绘制目标纹理，待将其绘制到 canvas 后它将变为 backgroundTexture
+  - colorRampTexture：表示一条渐变色带，根据风力大小获取颜色，被编码成 16 x 16 像素的纹理对象
+  - particleStateTexture0：保存粒子位置的纹理，大小默认是 256 x 256 像素
+  - particleStateTexture1：更新时需要保存粒子新位置的容器纹理，作交换容器纹理使用，大小同上面那个纹理
 - 帧缓存对象（`WebGLFramebuffer`）
-  - framebuffer
+  - framebuffer：离屏绘制的容器，其颜色附件是 screenTexture，先绘制一层 backgroundTexture，然后再绘制一层风粒子
 - 图形缓存对象（`WebGLBuffer`）
-  - quadBuffer
-  - particleIndexBuffer
+  - quadBuffer：代表全绘图可视区域窗口的一个 vertex buffer（仅坐标）
+  - particleIndexBuffer：粒子的索引号，用这个 index 数值可以找到 `particleStateTexture0` 上的颜色值进而计算出粒子坐标
 - 风场数据对象（`object`）
-  - windData
+  - windData：包括两个方向风力最大最小值、风力纹理的大小和风力数据本身
 
 # 2 渲染流程
 
@@ -202,7 +202,100 @@ setColorRamp(colors) {
 
 这一步完成在 glsl 中移动粒子坐标。
 
+在这一步，用到了 `updateProgram` 和 fbo 进行离屏绘制，绘制的目标纹理是 `particleStateTexture1`（被作为颜色附件）。
 
+### ③.a - 向 pipeline 传入了什么数据
+
+传入两张纹理：windTexture 和 particleStateTexture0
+
+传入一个 vertex buffer：quadBuffer
+
+传入了什么 uniform：`u_rand_speed`、`u_wind_res`、`u_wind_min`、`u_wind_max`、`u_speed_factor`、`u_drop_rate`、`u_drop_rate_bump`
+
+### ③.b - 顶点着色器
+
+用的还是 `QUAD_VS`，即把 quadBuffer 的坐标当纹理坐标传给 fs，本身绘制一个四边形的顶点。
+
+### ③.c - 片元着色器
+
+用的是 `UPDATE_FS`，这个代码略长，分解来看。
+
+除了一堆 uniform 输入外，先看一个函数：
+
+``` glsl
+const vec3 rand_constants = vec3(12.9898, 78.233, 4375.85453);
+float rand(const vec2 co) {
+  float t = dot(rand_constants.xy, co);
+  return fract(sin(t) * (rand_constants.z + t));
+}
+```
+
+这是一个伪随机数生成函数，旨在传入一个 vec2，返回一个浮点随机数，是一篇著名的博客提到的巧妙算法。
+
+接下来是使用了双线性内插算法的一个查找函数：
+
+``` glsl
+vec2 lookup_wind(const vec2 uv) {
+  // return texture2D(u_wind, uv).rg; // lower-res hardware filtering
+  vec2 px = 1.0 / u_wind_res;
+  vec2 vc = (floor(uv * u_wind_res)) * px;
+  vec2 f = fract(uv * u_wind_res);
+  vec2 tl = texture2D(u_wind, vc).rg;
+  vec2 tr = texture2D(u_wind, vc + vec2(px.x, 0)).rg;
+  vec2 bl = texture2D(u_wind, vc + vec2(0, px.y)).rg;
+  vec2 br = texture2D(u_wind, vc + px).rg;
+  return mix(mix(tl, tr, f.x), mix(bl, br, f.x), f.y);
+}
+```
+
+它接受一个 vec2，使用了风场的分辨率转换后，获取它在风场数据中的插值。这个 vec2 即粒子坐标，要寻找这个粒子坐标落在风场数据中的何处，此处的风力值（两个方向）有多大，用到双线性内插算法。
+
+这个 `lookup_wind` 函数将在主函数中使用：
+
+``` glsl
+void main() {
+  // 从 particleStateTexture0 中取颜色，并解码成粒子坐标
+  vec4 color = texture2D(u_particles, v_tex_pos);
+  vec2 pos = vec2(
+    color.r / 255.0 + color.b,
+    color.g / 255.0 + color.a);
+
+  // 混合最大最小风速和双线性内插找到的目标点处的风速，并计算其模长的归一化值
+  vec2 velocity = mix(u_wind_min, u_wind_max, lookup_wind(pos));
+  float speed_t = length(velocity) / length(u_wind_max);
+
+  // 考虑高纬度值的情况，根据风速值和粒子运动速度值计算粒子偏移量
+  // pos.y * 180 是纬度值，减去 90 度再取余弦值作为高纬度畸变量
+  float distortion = cos(radians(pos.y * 180.0 - 90.0));
+  // velocity.x / distortion 是为了把高纬度的 x 速度降下来，高纬度 distortion 也会变大
+  vec2 offset = vec2(velocity.x / distortion, -velocity.y) * 0.0001 * u_speed_factor; // u_speed_factor 默认值是 0.15，还要缩小 10000 倍
+
+  // 更新粒子坐标，将解码到的坐标加上偏移量，再加 vec2(1.0)，若正数取小数，若负数取它到比它小的整数的距离：意义不大明白
+  pos = fract(1.0 + pos + offset);
+
+  // 使用已更新的粒子坐标、纹理坐标（此处的纹理坐标没啥意义，仅仅是 particleStateTexture0 的数据位置）、随机种子创建随机种子向量
+  vec2 seed = (pos + v_tex_pos) * u_rand_seed;
+
+  // drop rate 是粒子在随机位置重新绘制的概率，使用归一化速度值和两个 uniform 数字计算而来
+  float drop_rate = u_drop_rate + speed_t * u_drop_rate_bump;
+  float drop = step(1.0 - drop_rate, rand(seed));
+
+  // 使用随机位置、坠落概率值混合偏移后的坐标
+  vec2 random_pos = vec2(
+    rand(seed + 1.3),
+    rand(seed + 2.1));
+  pos = mix(pos, random_pos, drop);
+
+  // 将更新后的粒子坐标编码回 RGBA
+  gl_FragColor = vec4(
+    fract(pos * 255.0),
+    floor(pos * 255.0) / 255.0);
+}
+```
+
+倒过来看，最后给到 `gl_FragColor` 的是一个颜色值，用到坐标转 RGBA 的编码算法，很简单。
+
+其他的代码的解读见注释，有一部分暂时不知道为什么要这么算，大致知道其目的。
 
 ## ④ drawTexture()
 
